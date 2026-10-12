@@ -29,6 +29,13 @@
       "when": 1791773699949,
       "tag": "0003_hard_thing",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791774298557,
+      "tag": "0004_swift_hobgoblin",
+      "breakpoints": true
     }
   ]
 }

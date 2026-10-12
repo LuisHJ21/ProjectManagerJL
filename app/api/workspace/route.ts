@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "../../chatgpt-auth";
 import { isRichDocument } from "../../../lib/rich-text";
+import { generatePassword, generateUsername, getAuthenticatedUser, hashPassword } from "../../../lib/team-auth";
 
 export const dynamic = "force-dynamic";
 type Row = Record<string, unknown>;
@@ -18,25 +18,6 @@ const richValue = (input: unknown) => {
   if (!input.startsWith('{"v":')) return input.trim().slice(0,3000);
   try { const doc: unknown = JSON.parse(input); return isRichDocument(doc) ? JSON.stringify(doc) : null; } catch { return null; }
 };
-
-async function identity() {
-  const auth = await getChatGPTUser();
-  if (!auth) return null;
-  const database = db();
-  const email = auth.email.trim().toLowerCase();
-  let user = await database.prepare("SELECT * FROM users WHERE auth_id = ? OR lower(email) = ? LIMIT 1").bind(auth.userId, email).first<Row>();
-  if (!user) {
-    const count = await database.prepare("SELECT count(*) AS n FROM users").first<{ n: number }>();
-    if (count?.n !== 0) return { pending: true as const, email };
-    const uid = uuid();
-    await database.prepare("INSERT INTO users (id,email,name,role,auth_id,created_at) VALUES (?,?,?,?,?,?)").bind(uid, email, auth.fullName || auth.displayName, "coordinator", auth.userId, new Date().toISOString()).run();
-    user = await database.prepare("SELECT * FROM users WHERE id = ?").bind(uid).first<Row>();
-  } else if (!user.auth_id) {
-    await database.prepare("UPDATE users SET auth_id = ? WHERE id = ?").bind(auth.userId, user.id).run();
-    user.auth_id = auth.userId;
-  }
-  return user;
-}
 
 async function hasProject(projectId: string) {
   return db().prepare("SELECT id FROM projects WHERE id=?").bind(projectId).first();
@@ -100,15 +81,14 @@ async function pendingDependencies(taskId: string, ids?: string[]) {
 
 export async function GET() {
   try {
-    const user = await identity();
+    const user = await getAuthenticatedUser();
     if (!user) return fail("Debes iniciar sesión", 401);
-    if ("pending" in user) return Response.json({ pending: true, email: user.email });
     const database = db(), coordinator = user.role === "coordinator";
     const projectWhere = "EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?) OR EXISTS (SELECT 1 FROM tasks t LEFT JOIN task_assignees ta ON ta.task_id=t.id WHERE t.project_id=p.id AND (ta.user_id=? OR t.assignee_id=?))";
-    const [projects,tasks,users,members,groups,stages,stakeholders,assignees,reschedules,dependencies,dependencyTasks] = await Promise.all([
+    const [projects,tasks,users,members,groups,stages,stakeholders,assignees,reschedules,dependencies,dependencyTasks,notes] = await Promise.all([
       database.prepare(coordinator ? "SELECT * FROM projects ORDER BY created_at DESC" : `SELECT p.* FROM projects p WHERE ${projectWhere} ORDER BY p.created_at DESC`).bind(...(coordinator?[]:[user.id,user.id,user.id])).all<Row>(),
       database.prepare(coordinator ? "SELECT * FROM tasks ORDER BY created_at DESC" : "SELECT DISTINCT t.* FROM tasks t LEFT JOIN task_assignees a ON a.task_id=t.id WHERE a.user_id=? OR t.assignee_id=? ORDER BY t.created_at DESC").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
-      database.prepare(coordinator ? "SELECT id,email,name,role,created_at FROM users ORDER BY name" : "SELECT DISTINCT u.id,u.name,u.role FROM users u JOIN project_members m ON m.user_id=u.id WHERE m.project_id IN (SELECT project_id FROM project_members WHERE user_id=?) ORDER BY u.name").bind(...(coordinator?[]:[user.id])).all<Row>(),
+      database.prepare(coordinator ? "SELECT id,email,name,role,username,created_at FROM users ORDER BY name" : "SELECT DISTINCT u.id,u.name,u.role,u.username FROM users u JOIN project_members m ON m.user_id=u.id WHERE m.project_id IN (SELECT project_id FROM project_members WHERE user_id=?) ORDER BY u.name").bind(...(coordinator?[]:[user.id])).all<Row>(),
       database.prepare(coordinator ? "SELECT * FROM project_members" : "SELECT * FROM project_members WHERE user_id=?").bind(...(coordinator?[]:[user.id])).all<Row>(),
       database.prepare("SELECT * FROM project_groups ORDER BY name").all<Row>(),
       database.prepare(coordinator ? "SELECT * FROM stages ORDER BY sort_order,name" : "SELECT s.* FROM stages s JOIN projects p ON p.id=s.project_id WHERE " + projectWhere + " ORDER BY s.sort_order,s.name").bind(...(coordinator?[]:[user.id,user.id,user.id])).all<Row>(),
@@ -117,24 +97,35 @@ export async function GET() {
       database.prepare(coordinator ? "SELECT * FROM task_reschedules ORDER BY created_at DESC" : "SELECT r.* FROM task_reschedules r WHERE r.task_id IN (SELECT task_id FROM task_assignees WHERE user_id=?) OR r.task_id IN (SELECT id FROM tasks WHERE assignee_id=?) ORDER BY r.created_at DESC").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
       database.prepare(coordinator ? "SELECT * FROM task_dependencies" : "SELECT d.* FROM task_dependencies d WHERE d.task_id IN (SELECT task_id FROM task_assignees WHERE user_id=?) OR d.task_id IN (SELECT id FROM tasks WHERE assignee_id=?)").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
       database.prepare(coordinator ? "SELECT id,title,status FROM tasks" : "SELECT DISTINCT t.id,t.title,t.status FROM tasks t JOIN task_dependencies d ON d.depends_on_id=t.id WHERE d.task_id IN (SELECT task_id FROM task_assignees WHERE user_id=?) OR d.task_id IN (SELECT id FROM tasks WHERE assignee_id=?)").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
+      database.prepare(coordinator ? "SELECT n.*,u.name AS author_name FROM task_notes n JOIN users u ON u.id=n.author_id ORDER BY n.created_at DESC" : "SELECT DISTINCT n.*,u.name AS author_name FROM task_notes n JOIN users u ON u.id=n.author_id JOIN tasks t ON t.id=n.task_id LEFT JOIN task_assignees a ON a.task_id=t.id WHERE a.user_id=? OR t.assignee_id=? ORDER BY n.created_at DESC").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
     ]);
-    return Response.json({user,projects:projects.results,tasks:tasks.results,users:users.results,members:members.results,groups:groups.results,stages:stages.results,stakeholders:stakeholders.results,assignees:assignees.results,reschedules:reschedules.results,dependencies:dependencies.results,dependencyTasks:dependencyTasks.results});
+    return Response.json({user,projects:projects.results,tasks:tasks.results,users:users.results,members:members.results,groups:groups.results,stages:stages.results,stakeholders:stakeholders.results,assignees:assignees.results,reschedules:reschedules.results,dependencies:dependencies.results,dependencyTasks:dependencyTasks.results,notes:notes.results});
   } catch (error) { console.error(error); return fail("No se pudieron cargar los datos",500); }
 }
 
 export async function POST(request: Request) {
   try {
-    const user = await identity();
+    const user = await getAuthenticatedUser();
     if (!user) return fail("Debes iniciar sesión",401);
-    if ("pending" in user) return fail("Tu cuenta aún no ha sido invitada",403);
     const body = await request.json() as Record<string,unknown>;
     const operation = value(body.operation,40), database = db(), coordinator = user.role === "coordinator";
-    if (operation !== "taskProgress" && !coordinator) return fail("Acceso denegado",403);
+    if (!(["taskProgress","taskNote"].includes(operation)) && !coordinator) return fail("Acceso denegado",403);
+    let credentials: { username: string; password: string } | undefined;
 
     if (operation === "member") {
       const email=value(body.email,254).toLowerCase(), name=value(body.name,100);
       if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail("Nombre o correo no válido");
-      await database.prepare("INSERT INTO users (id,email,name,role,created_at) VALUES (?,?,?,?,?)").bind(uuid(),email,name,body.role==="coordinator"?"coordinator":"staff",new Date().toISOString()).run();
+      if (await database.prepare("SELECT 1 FROM users WHERE lower(email)=?").bind(email).first()) return fail("Ese correo ya está registrado");
+      const username=await generateUsername(name),password=generatePassword();
+      await database.prepare("INSERT INTO users (id,email,name,role,username,password_hash,created_at) VALUES (?,?,?,?,?,?,?)").bind(uuid(),email,name,body.role==="coordinator"?"coordinator":"staff",username,await hashPassword(password),new Date().toISOString()).run();
+      credentials={username,password};
+    } else if (operation === "credentials") {
+      const id=value(body.id,40);
+      const target=await database.prepare("SELECT id,name,username FROM users WHERE id=?").bind(id).first<{id:string;name:string;username:string|null}>();
+      if(!target)return fail("Persona no encontrada",404);
+      const username=target.username||await generateUsername(target.name),password=generatePassword();
+      await database.batch([database.prepare("UPDATE users SET username=?,password_hash=? WHERE id=?").bind(username,await hashPassword(password),id),database.prepare("DELETE FROM user_sessions WHERE user_id=?").bind(id)]);
+      credentials={username,password};
     } else if (operation === "role") {
       if (body.id===user.id) return fail("No puedes cambiar tu propio rol");
       if (!["coordinator","staff"].includes(value(body.role))) return fail("Rol no válido");
@@ -257,8 +248,15 @@ export async function POST(request: Request) {
       }
       await database.prepare("UPDATE tasks SET status=?,actual_start=?,actual_end=?,progress=? WHERE id=?")
         .bind(status,start,end,status==="done"?100:progress,taskId).run();
+    } else if (operation === "taskNote") {
+      const taskId=value(body.taskId,40),text=value(body.text,2000);
+      if(!text)return fail("Escribe una anotación");
+      const task=await database.prepare("SELECT assignee_id FROM tasks WHERE id=?").bind(taskId).first<{assignee_id:string|null}>();
+      if(!task)return fail("Actividad no encontrada",404);
+      if(!coordinator&&task.assignee_id!==user.id&&!await database.prepare("SELECT 1 FROM task_assignees WHERE task_id=? AND user_id=?").bind(taskId,user.id).first())return fail("Acceso denegado",403);
+      await database.prepare("INSERT INTO task_notes (id,task_id,author_id,body,created_at) VALUES (?,?,?,?,?)").bind(uuid(),taskId,user.id,text,new Date().toISOString()).run();
     } else return fail("Operación no reconocida");
-    return Response.json({ok:true});
+    return Response.json({ok:true,credentials});
   } catch(error) {
     console.error(error);
     return fail(error instanceof Error&&/UNIQUE constraint failed/.test(error.message)?"Ese dato ya está registrado":"No se pudo guardar el cambio",500);

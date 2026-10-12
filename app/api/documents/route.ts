@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "../../chatgpt-auth";
+import { getAuthenticatedUser } from "../../../lib/team-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -10,9 +10,7 @@ const extensions = new Set(["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", 
 const maxBytes = 20 * 1024 * 1024;
 
 async function currentUser(): Promise<User | null> {
-  const auth = await getChatGPTUser();
-  if (!auth || !env.DB) return null;
-  return await env.DB.prepare("SELECT id,role FROM users WHERE auth_id=? OR lower(email)=? LIMIT 1").bind(auth.userId, auth.email.trim().toLowerCase()).first<User>();
+  return getAuthenticatedUser();
 }
 
 async function canAccess(projectId: string, user: User) {

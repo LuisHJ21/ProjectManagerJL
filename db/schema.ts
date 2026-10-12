@@ -3,7 +3,16 @@ import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(), email: text("email").notNull().unique(),
   name: text("name").notNull(), role: text("role", { enum: ["coordinator", "staff"] }).notNull().default("staff"),
-  authId: text("auth_id").unique(), createdAt: text("created_at").notNull(),
+  authId: text("auth_id").unique(), username: text("username").unique(), passwordHash: text("password_hash"), createdAt: text("created_at").notNull(),
+});
+
+export const userSessions = sqliteTable("user_sessions", {
+  tokenHash: text("token_hash").primaryKey(), userId: text("user_id").notNull(),
+  createdAt: text("created_at").notNull(), expiresAt: text("expires_at").notNull(),
+});
+
+export const loginAttempts = sqliteTable("login_attempts", {
+  key: text("key").primaryKey(), failures: integer("failures").notNull().default(0), windowStart: text("window_start").notNull(),
 });
 
 export const projects = sqliteTable("projects", {
@@ -77,4 +86,9 @@ export const taskReschedules = sqliteTable("task_reschedules", {
   newStart: text("new_start"), newEnd: text("new_end"),
   reason: text("reason").notNull(), changedBy: text("changed_by").notNull(),
   createdAt: text("created_at").notNull(),
+});
+
+export const taskNotes = sqliteTable("task_notes", {
+  id: text("id").primaryKey(), taskId: text("task_id").notNull(), authorId: text("author_id").notNull(),
+  body: text("body").notNull(), createdAt: text("created_at").notNull(),
 });
