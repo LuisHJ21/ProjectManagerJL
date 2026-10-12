@@ -14,7 +14,7 @@ type Modal = "project"|"profile"|"group"|"stage"|"stakeholder"|"task"|"taskManag
 const statuses:Record<string,string> = {todo:"Por hacer",progress:"En progreso",review:"En revisión",done:"Completada",planning:"Planificación",active:"En marcha",completed:"Finalizado"};
 const raci:Record<string,string> = {R:"Responsable",A:"Aprobador",C:"Consultado",I:"Informado"};
 const blank = {id:"",name:"",code:"",description:"",scope:"",objective:"",risks:"",budget:"0",currency:"PEN",projectId:"",groupId:"",title:"",kind:"activity",stageId:"",estimatedHours:"8",priority:"medium",plannedStart:"",plannedEnd:"",actualStart:"",actualEnd:"",progress:"0",status:"todo",reason:"",email:"",role:"staff",organization:"",roleName:"",raci:"I",userId:""};
-const today = () => new Date().toISOString().slice(0,10);
+const today = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
 const fmt = (d:string|null|undefined) => d ? new Date(`${d}T12:00:00`).toLocaleDateString("es-PE",{day:"2-digit",month:"short",year:"numeric"}) : "—";
 const initials = (s:string) => s.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase();
 const delayed = (t:Task) => t.status!=="done" && !!t.planned_end && t.planned_end<today();
