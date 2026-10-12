@@ -54,7 +54,7 @@ Nexo uses accounts in D1. Coordinators create users, assign roles, and generate 
 
 Passwords are stored as salted PBKDF2-SHA256 hashes. Session cookies are HttpOnly and use Secure on HTTPS. Resetting credentials revokes existing sessions.
 
-For an existing account without credentials, an administrator may temporarily configure the secret NEXO_INITIAL_CREDENTIALS as an array of { id, username, passwordHash } records. The login handler initializes only users whose username and password hash are both null. It never changes roles or replaces existing passwords. Remove the secret and redeploy after initializing accounts. Do not store credential values in source files.
+For an existing account without credentials, an administrator may temporarily configure the secret NEXO_INITIAL_CREDENTIALS as an array of { id, username, passwordHash } records. The login handler initializes only users whose username and password hash are both null. It never changes roles. An explicit previousPasswordHash can migrate an incompatible hash only if its exact stored value matches. Remove the secret and redeploy after initializing accounts. Do not store credential values in source files.
 
 ## Local D1 migrations
 

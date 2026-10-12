@@ -22,19 +22,21 @@ export async function getAuthenticatedUser(): Promise<AppUser | null> {
 }
 
 // Temporary server configuration initializes credentials for existing accounts.
-// It never overwrites a password or changes a role; remove it after provisioning.
+// Existing hashes can be migrated only when their exact previous value matches.
+// Remove the configuration after provisioning; roles are never changed here.
 export async function provisionInitialCredentials() {
   if (!env.DB || !env.NEXO_INITIAL_CREDENTIALS) return;
   const entries: unknown = JSON.parse(env.NEXO_INITIAL_CREDENTIALS);
   if (!Array.isArray(entries) || entries.length < 1 || entries.length > 10) throw new Error("Configuración inicial no válida");
-  const statements = entries.map((entry: { id?: unknown; username?: unknown; passwordHash?: unknown }) => {
+  const statements = entries.map((entry: { id?: unknown; username?: unknown; passwordHash?: unknown; previousPasswordHash?: unknown }) => {
     if (typeof entry.id !== "string" || !/^[a-f0-9-]{36}$/.test(entry.id) ||
         typeof entry.username !== "string" || !/^[a-z0-9][a-z0-9.]{2,79}$/.test(entry.username) ||
-        typeof entry.passwordHash !== "string" || !/^pbkdf2-sha256\$210000\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/.test(entry.passwordHash)) {
+        typeof entry.passwordHash !== "string" || !/^pbkdf2-sha256\$100000\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/.test(entry.passwordHash) ||
+        (entry.previousPasswordHash !== undefined && (typeof entry.previousPasswordHash !== "string" || !/^pbkdf2-sha256\$210000\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/.test(entry.previousPasswordHash)))) {
       throw new Error("Configuración inicial no válida");
     }
-    return env.DB!.prepare("UPDATE users SET username=?,password_hash=? WHERE id=? AND username IS NULL AND password_hash IS NULL")
-      .bind(entry.username, entry.passwordHash, entry.id);
+    return env.DB!.prepare("UPDATE users SET username=?,password_hash=? WHERE id=? AND ((username IS NULL AND password_hash IS NULL) OR (username=? AND password_hash=?))")
+      .bind(entry.username, entry.passwordHash, entry.id, entry.username, entry.previousPasswordHash ?? null);
   });
   await env.DB.batch(statements);
 }
@@ -42,17 +44,17 @@ export async function provisionInitialCredentials() {
 export async function hashPassword(password: string) {
   const salt = randomBytes(16);
   const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const hash = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 210_000 }, key, 256));
-  return `pbkdf2-sha256$210000$${base64(salt)}$${base64(hash)}`;
+  const hash = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 100_000 }, key, 256));
+  return `pbkdf2-sha256$100000$${base64(salt)}$${base64(hash)}`;
 }
 
 export async function verifyPassword(password: string, stored: string) {
   const [algorithm, rounds, saltText, hashText] = stored.split("$");
-  if (algorithm !== "pbkdf2-sha256" || rounds !== "210000" || !saltText || !hashText) return false;
+  if (algorithm !== "pbkdf2-sha256" || rounds !== "100000" || !saltText || !hashText) return false;
   const decode = (text: string) => Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), char => char.charCodeAt(0));
   const salt = decode(saltText), expected = decode(hashText);
   const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const actual = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 210_000 }, key, expected.length * 8));
+  const actual = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 100_000 }, key, expected.length * 8));
   let difference = actual.length ^ expected.length;
   for (let i = 0; i < expected.length; i++) difference |= actual[i] ^ expected[i];
   return difference === 0;
