@@ -55,6 +55,42 @@ async function setAssignees(taskId: string, projectId: string, ids: string[]) {
   await database.batch(statements);
 }
 
+async function validateDependencies(projectId: string, taskId: string | null, ids: string[]) {
+  if (ids.length > 30 || ids.includes(taskId || "")) return false;
+  const database = db();
+  for (const dependencyId of ids) {
+    if (!await database.prepare("SELECT id FROM tasks WHERE id=? AND project_id=?").bind(dependencyId,projectId).first()) return false;
+  }
+  if (!taskId) return true;
+  const edges = await database.prepare("SELECT d.task_id,d.depends_on_id FROM task_dependencies d JOIN tasks t ON t.id=d.task_id WHERE t.project_id=?").bind(projectId).all<{task_id:string;depends_on_id:string}>();
+  const graph = new Map<string,string[]>();
+  for (const edge of edges.results) graph.set(edge.task_id,[...(graph.get(edge.task_id)||[]),edge.depends_on_id]);
+  graph.set(taskId,ids);
+  const visit=(node:string,seen:Set<string>):boolean => {
+    if(node===taskId) return true;
+    if(seen.has(node)) return false;
+    seen.add(node);
+    return (graph.get(node)||[]).some(next=>visit(next,seen));
+  };
+  return !ids.some(dep=>visit(dep,new Set()));
+}
+
+async function setDependencies(taskId: string, ids: string[]) {
+  const database=db();
+  await database.batch([database.prepare("DELETE FROM task_dependencies WHERE task_id=?").bind(taskId),...ids.map(dep=>database.prepare("INSERT INTO task_dependencies (task_id,depends_on_id) VALUES (?,?)").bind(taskId,dep))]);
+}
+
+async function pendingDependencies(taskId: string, ids?: string[]) {
+  const database=db();
+  const dependencies=ids??(await database.prepare("SELECT depends_on_id FROM task_dependencies WHERE task_id=?").bind(taskId).all<{depends_on_id:string}>()).results.map(r=>r.depends_on_id);
+  const pending:string[]=[];
+  for(const dependencyId of dependencies) {
+    const task=await database.prepare("SELECT title,status FROM tasks WHERE id=?").bind(dependencyId).first<{title:string;status:string}>();
+    if(task && task.status!=="done") pending.push(task.title);
+  }
+  return pending;
+}
+
 export async function GET() {
   try {
     const user = await identity();
@@ -62,7 +98,7 @@ export async function GET() {
     if ("pending" in user) return Response.json({ pending: true, email: user.email });
     const database = db(), coordinator = user.role === "coordinator";
     const projectWhere = "EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?) OR EXISTS (SELECT 1 FROM tasks t LEFT JOIN task_assignees ta ON ta.task_id=t.id WHERE t.project_id=p.id AND (ta.user_id=? OR t.assignee_id=?))";
-    const [projects,tasks,users,members,groups,stages,stakeholders,assignees,reschedules] = await Promise.all([
+    const [projects,tasks,users,members,groups,stages,stakeholders,assignees,reschedules,dependencies,dependencyTasks] = await Promise.all([
       database.prepare(coordinator ? "SELECT * FROM projects ORDER BY created_at DESC" : `SELECT p.* FROM projects p WHERE ${projectWhere} ORDER BY p.created_at DESC`).bind(...(coordinator?[]:[user.id,user.id,user.id])).all<Row>(),
       database.prepare(coordinator ? "SELECT * FROM tasks ORDER BY created_at DESC" : "SELECT DISTINCT t.* FROM tasks t LEFT JOIN task_assignees a ON a.task_id=t.id WHERE a.user_id=? OR t.assignee_id=? ORDER BY t.created_at DESC").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
       database.prepare(coordinator ? "SELECT id,email,name,role,created_at FROM users ORDER BY name" : "SELECT DISTINCT u.id,u.name,u.role FROM users u JOIN project_members m ON m.user_id=u.id WHERE m.project_id IN (SELECT project_id FROM project_members WHERE user_id=?) ORDER BY u.name").bind(...(coordinator?[]:[user.id])).all<Row>(),
@@ -72,8 +108,10 @@ export async function GET() {
       database.prepare(coordinator ? "SELECT * FROM stakeholders ORDER BY name" : "SELECT s.* FROM stakeholders s JOIN projects p ON p.id=s.project_id WHERE " + projectWhere + " ORDER BY s.name").bind(...(coordinator?[]:[user.id,user.id,user.id])).all<Row>(),
       database.prepare(coordinator ? "SELECT * FROM task_assignees" : "SELECT a.* FROM task_assignees a WHERE a.user_id=? OR a.task_id IN (SELECT task_id FROM task_assignees WHERE user_id=?)").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
       database.prepare(coordinator ? "SELECT * FROM task_reschedules ORDER BY created_at DESC" : "SELECT r.* FROM task_reschedules r WHERE r.task_id IN (SELECT task_id FROM task_assignees WHERE user_id=?) OR r.task_id IN (SELECT id FROM tasks WHERE assignee_id=?) ORDER BY r.created_at DESC").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
+      database.prepare(coordinator ? "SELECT * FROM task_dependencies" : "SELECT d.* FROM task_dependencies d WHERE d.task_id IN (SELECT task_id FROM task_assignees WHERE user_id=?) OR d.task_id IN (SELECT id FROM tasks WHERE assignee_id=?)").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
+      database.prepare(coordinator ? "SELECT id,title,status FROM tasks" : "SELECT DISTINCT t.id,t.title,t.status FROM tasks t JOIN task_dependencies d ON d.depends_on_id=t.id WHERE d.task_id IN (SELECT task_id FROM task_assignees WHERE user_id=?) OR d.task_id IN (SELECT id FROM tasks WHERE assignee_id=?)").bind(...(coordinator?[]:[user.id,user.id])).all<Row>(),
     ]);
-    return Response.json({user,projects:projects.results,tasks:tasks.results,users:users.results,members:members.results,groups:groups.results,stages:stages.results,stakeholders:stakeholders.results,assignees:assignees.results,reschedules:reschedules.results});
+    return Response.json({user,projects:projects.results,tasks:tasks.results,users:users.results,members:members.results,groups:groups.results,stages:stages.results,stakeholders:stakeholders.results,assignees:assignees.results,reschedules:reschedules.results,dependencies:dependencies.results,dependencyTasks:dependencyTasks.results});
   } catch (error) { console.error(error); return fail("No se pudieron cargar los datos",500); }
 }
 
@@ -148,37 +186,56 @@ export async function POST(request: Request) {
       const start=date(body.plannedStart),end=date(body.plannedEnd);
       if(!start||!end||!validRange(start,end))return fail("Indica fechas planificadas válidas");
       const kind=body.kind==="milestone"?"milestone":"activity";
-      const hours=kind==="milestone"?0:Number(body.estimatedHours);
-      if(!Number.isInteger(hours)||hours<0||hours>100000)return fail("Horas estimadas no válidas");
+      const estimateUnit=body.estimateUnit==="days"?"days":"hours";
+      const estimateValue=kind==="milestone"?0:Number(body.estimateValue??body.estimatedHours);
+      if(!Number.isFinite(estimateValue)||estimateValue<0||estimateValue>100000||Math.abs(Math.round(estimateValue*100)-estimateValue*100)>1e-7)return fail("Estimación no válida");
+      const hours=estimateUnit==="hours"?Math.round(estimateValue):0;
+      const dependencyIds=list(body.dependencyIds);
+      if(!await validateDependencies(projectId,operation==="task"?null:taskId,dependencyIds))return fail("Las dependencias deben pertenecer al proyecto y no pueden formar ciclos");
       const priority=["low","medium","high"].includes(value(body.priority))?body.priority:"medium";
       if(operation==="task") {
         const newId=uuid();
-        await database.prepare("INSERT INTO tasks (id,project_id,title,description,domain,assignee_id,status,priority,estimated_hours,planned_start,planned_end,created_at,kind,stage_id,progress) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-          .bind(newId,projectId,title,value(body.description,1000),"delivery",ids[0],"todo",priority,hours,start,end,new Date().toISOString(),kind,stageId,0).run();
+        await database.prepare("INSERT INTO tasks (id,project_id,title,description,domain,assignee_id,status,priority,estimated_hours,planned_start,planned_end,created_at,kind,stage_id,progress,estimate_value,estimate_unit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .bind(newId,projectId,title,value(body.description,1000),"delivery",ids[0],"todo",priority,hours,start,end,new Date().toISOString(),kind,stageId,0,estimateValue,estimateUnit).run();
         await setAssignees(newId,projectId,ids);
+        await setDependencies(newId,dependencyIds);
       } else {
         const old=await database.prepare("SELECT * FROM tasks WHERE id=? AND project_id=?").bind(taskId,projectId).first<Row>();
         if(!old)return fail("Tarea no encontrada",404);
+        if(old.status!=="todo") {
+          const pending=await pendingDependencies(taskId,dependencyIds);
+          if(pending.length)return fail(`Completa primero: ${pending.join(", ")}`);
+        }
         const datesChanged=old.planned_start!==start||old.planned_end!==end;
         const reason=value(body.reason,500);
         if(datesChanged&&!reason)return fail("Indica el motivo de la reprogramación");
-        const statements=[database.prepare("UPDATE tasks SET title=?,description=?,priority=?,estimated_hours=?,planned_start=?,planned_end=?,kind=?,stage_id=?,assignee_id=? WHERE id=?")
-          .bind(title,value(body.description,1000),priority,hours,start,end,kind,stageId,ids[0],taskId)];
+        const statements=[database.prepare("UPDATE tasks SET title=?,description=?,priority=?,estimated_hours=?,planned_start=?,planned_end=?,kind=?,stage_id=?,assignee_id=?,estimate_value=?,estimate_unit=? WHERE id=?")
+          .bind(title,value(body.description,1000),priority,hours,start,end,kind,stageId,ids[0],estimateValue,estimateUnit,taskId)];
         if(datesChanged) statements.push(database.prepare("INSERT INTO task_reschedules (id,task_id,old_start,old_end,new_start,new_end,reason,changed_by,created_at) VALUES (?,?,?,?,?,?,?,?,?)")
           .bind(uuid(),taskId,old.planned_start,old.planned_end,start,end,reason,user.id,new Date().toISOString()));
         await database.batch(statements);
         await setAssignees(taskId,projectId,ids);
+        await setDependencies(taskId,dependencyIds);
       }
     } else if (operation === "taskProgress") {
       const taskId=value(body.id,40),status=value(body.status,20);
       if(!statuses.includes(status))return fail("Estado no válido");
-      const task=await database.prepare("SELECT assignee_id FROM tasks WHERE id=?").bind(taskId).first<{assignee_id:string|null}>();
+      const task=await database.prepare("SELECT assignee_id,status FROM tasks WHERE id=?").bind(taskId).first<{assignee_id:string|null;status:string}>();
       if(!task)return fail("Tarea no encontrada",404);
       if(!coordinator&&task.assignee_id!==user.id&&!await database.prepare("SELECT 1 FROM task_assignees WHERE task_id=? AND user_id=?").bind(taskId,user.id).first())return fail("Acceso denegado",403);
       const start=date(body.actualStart),end=date(body.actualEnd);
       if(!validRange(start,end))return fail("La fecha final real debe ser posterior al inicio");
       const progress=Number(body.progress);
       if(!Number.isInteger(progress)||progress<0||progress>100)return fail("El avance debe estar entre 0 y 100");
+      if(status==="todo"&&(progress>0||start||end))return fail("Cambia el estado a En progreso para registrar ejecución");
+      if(task.status==="done"&&status!=="done") {
+        const dependent=await database.prepare("SELECT t.title FROM tasks t JOIN task_dependencies d ON d.task_id=t.id WHERE d.depends_on_id=? AND t.status<>'todo' LIMIT 1").bind(taskId).first<{title:string}>();
+        if(dependent)return fail(`No puedes reabrir esta actividad mientras ${dependent.title} esté en ejecución`);
+      }
+      if(status!=="todo") {
+        const pending=await pendingDependencies(taskId);
+        if(pending.length)return fail(`Completa primero las dependencias: ${pending.join(", ")}`);
+      }
       await database.prepare("UPDATE tasks SET status=?,actual_start=?,actual_end=?,progress=? WHERE id=?")
         .bind(status,start,end,status==="done"?100:progress,taskId).run();
     } else return fail("Operación no reconocida");

@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(), email: text("email").notNull().unique(),
@@ -48,6 +48,12 @@ export const tasks = sqliteTable("tasks", {
   actualStart: text("actual_start"), actualEnd: text("actual_end"), createdAt: text("created_at").notNull(),
   kind: text("kind").notNull().default("activity"), stageId: text("stage_id"),
   progress: integer("progress").notNull().default(0),
+  estimateValue: real("estimate_value").notNull().default(0),
+  estimateUnit: text("estimate_unit").notNull().default("hours"),
+});
+
+export const taskDependencies = sqliteTable("task_dependencies", {
+  taskId: text("task_id").notNull(), dependsOnId: text("depends_on_id").notNull(),
 });
 
 export const taskAssignees = sqliteTable("task_assignees", {
