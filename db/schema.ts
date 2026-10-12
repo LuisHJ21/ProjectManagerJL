@@ -13,6 +13,24 @@ export const projects = sqliteTable("projects", {
   status: text("status", { enum: ["planning", "active", "completed"] }).notNull().default("planning"),
   plannedStart: text("planned_start"), plannedEnd: text("planned_end"),
   createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(),
+  scope: text("scope").notNull().default(""), risks: text("risks").notNull().default(""),
+  budget: integer("budget").notNull().default(0), currency: text("currency").notNull().default("PEN"),
+  groupId: text("group_id"),
+});
+
+export const projectGroups = sqliteTable("project_groups", {
+  id: text("id").primaryKey(), name: text("name").notNull().unique(), createdAt: text("created_at").notNull(),
+});
+
+export const stages = sqliteTable("stages", {
+  id: text("id").primaryKey(), projectId: text("project_id").notNull(),
+  name: text("name").notNull(), sortOrder: integer("sort_order").notNull().default(0),
+});
+
+export const stakeholders = sqliteTable("stakeholders", {
+  id: text("id").primaryKey(), projectId: text("project_id").notNull(),
+  name: text("name").notNull(), organization: text("organization").notNull().default(""),
+  role: text("role").notNull().default(""), raci: text("raci").notNull().default("I"),
 });
 
 export const projectMembers = sqliteTable("project_members", {
@@ -28,4 +46,18 @@ export const tasks = sqliteTable("tasks", {
   estimatedHours: integer("estimated_hours").notNull().default(0),
   plannedStart: text("planned_start"), plannedEnd: text("planned_end"),
   actualStart: text("actual_start"), actualEnd: text("actual_end"), createdAt: text("created_at").notNull(),
+  kind: text("kind").notNull().default("activity"), stageId: text("stage_id"),
+  progress: integer("progress").notNull().default(0),
+});
+
+export const taskAssignees = sqliteTable("task_assignees", {
+  taskId: text("task_id").notNull(), userId: text("user_id").notNull(),
+});
+
+export const taskReschedules = sqliteTable("task_reschedules", {
+  id: text("id").primaryKey(), taskId: text("task_id").notNull(),
+  oldStart: text("old_start"), oldEnd: text("old_end"),
+  newStart: text("new_start"), newEnd: text("new_end"),
+  reason: text("reason").notNull(), changedBy: text("changed_by").notNull(),
+  createdAt: text("created_at").notNull(),
 });
