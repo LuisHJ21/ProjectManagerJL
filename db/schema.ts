@@ -22,6 +22,17 @@ export const projectGroups = sqliteTable("project_groups", {
   id: text("id").primaryKey(), name: text("name").notNull().unique(), createdAt: text("created_at").notNull(),
 });
 
+export const projectDocuments = sqliteTable("project_documents", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  fileName: text("file_name").notNull(),
+  objectKey: text("object_key").notNull(),
+  mimeType: text("mime_type").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  uploadedBy: text("uploaded_by").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 export const stages = sqliteTable("stages", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull(),
   name: text("name").notNull(), sortOrder: integer("sort_order").notNull().default(0),
