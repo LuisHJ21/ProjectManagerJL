@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { createSession, sessionCookieHeader, verifyPassword } from "../../../../lib/team-auth";
+import { createSession, provisionInitialCredentials, sessionCookieHeader, verifyPassword } from "../../../../lib/team-auth";
 
 export const dynamic = "force-dynamic";
 const invalid = () => Response.json({ error: "Usuario o contraseña incorrectos" }, { status: 401 });
@@ -17,6 +17,7 @@ export async function POST(request: Request) {
     const attempt = await env.DB.prepare("SELECT failures,window_start FROM login_attempts WHERE key=?").bind(key).first<{ failures: number; window_start: string }>();
     const activeWindow = !!attempt && now.getTime() - Date.parse(attempt.window_start) < 15 * 60_000;
     if (activeWindow && attempt.failures >= 6) return Response.json({ error: "Demasiados intentos. Espera 15 minutos" }, { status: 429 });
+    await provisionInitialCredentials();
     const user = await env.DB.prepare("SELECT id,password_hash FROM users WHERE lower(username)=?").bind(username).first<{ id: string; password_hash: string | null }>();
     const valid = user?.password_hash ? await verifyPassword(password, user.password_hash) : false;
     if (!valid || !user) {

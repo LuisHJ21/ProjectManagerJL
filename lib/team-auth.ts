@@ -1,8 +1,7 @@
 import { env } from "cloudflare:workers";
 import { cookies } from "next/headers";
-import { getChatGPTUser } from "../app/chatgpt-auth";
 
-export type AppUser = { id: string; email: string; name: string; role: "coordinator" | "staff"; username: string | null; auth_id?: string | null };
+export type AppUser = { id: string; email: string; name: string; role: "coordinator" | "staff"; username: string | null };
 export const sessionCookie = "nexo_session";
 const sessionDays = 7;
 const encoder = new TextEncoder();
@@ -19,26 +18,25 @@ export async function getSessionUser(): Promise<AppUser | null> {
 }
 
 export async function getAuthenticatedUser(): Promise<AppUser | null> {
-  if (!env.DB) return null;
-  const auth = await getChatGPTUser();
-  if (auth) {
-    const email = auth.email.trim().toLowerCase();
-    let user = await env.DB.prepare("SELECT id,email,name,role,username,auth_id FROM users WHERE auth_id=? OR lower(email)=? LIMIT 1").bind(auth.userId, email).first<AppUser>();
-    if (!user) {
-      const count = await env.DB.prepare("SELECT count(*) AS n FROM users").first<{ n: number }>();
-      if (count?.n === 0) {
-        const id = crypto.randomUUID();
-        await env.DB.prepare("INSERT INTO users (id,email,name,role,auth_id,created_at) VALUES (?,?,?,?,?,?)")
-          .bind(id, email, auth.fullName || auth.displayName, "coordinator", auth.userId, new Date().toISOString()).run();
-        user = await env.DB.prepare("SELECT id,email,name,role,username,auth_id FROM users WHERE id=?").bind(id).first<AppUser>();
-      }
-    } else if (!user.auth_id) {
-      await env.DB.prepare("UPDATE users SET auth_id=? WHERE id=?").bind(auth.userId, user.id).run();
-      user.auth_id = auth.userId;
-    }
-    if (user) return user;
-  }
   return getSessionUser();
+}
+
+// Temporary server configuration initializes credentials for existing accounts.
+// It never overwrites a password or changes a role; remove it after provisioning.
+export async function provisionInitialCredentials() {
+  if (!env.DB || !env.NEXO_INITIAL_CREDENTIALS) return;
+  const entries: unknown = JSON.parse(env.NEXO_INITIAL_CREDENTIALS);
+  if (!Array.isArray(entries) || entries.length < 1 || entries.length > 10) throw new Error("Configuración inicial no válida");
+  const statements = entries.map((entry: { id?: unknown; username?: unknown; passwordHash?: unknown }) => {
+    if (typeof entry.id !== "string" || !/^[a-f0-9-]{36}$/.test(entry.id) ||
+        typeof entry.username !== "string" || !/^[a-z0-9][a-z0-9.]{2,79}$/.test(entry.username) ||
+        typeof entry.passwordHash !== "string" || !/^pbkdf2-sha256\$210000\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/.test(entry.passwordHash)) {
+      throw new Error("Configuración inicial no válida");
+    }
+    return env.DB!.prepare("UPDATE users SET username=?,password_hash=? WHERE id=? AND username IS NULL AND password_hash IS NULL")
+      .bind(entry.username, entry.passwordHash, entry.id);
+  });
+  await env.DB.batch(statements);
 }
 
 export async function hashPassword(password: string) {
