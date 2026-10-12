@@ -10,7 +10,7 @@ export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(), name: text("name").notNull(), code: text("code").notNull(),
   description: text("description").notNull().default(""), objective: text("objective").notNull().default(""),
   approach: text("approach", { enum: ["predictive", "adaptive", "hybrid"] }).notNull().default("hybrid"),
-  status: text("status", { enum: ["planning", "active", "completed"] }).notNull().default("planning"),
+  status: text("status", { enum: ["planning", "active", "pending", "in_progress", "standby", "cancelled", "completed"] }).notNull().default("planning"),
   plannedStart: text("planned_start"), plannedEnd: text("planned_end"),
   createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(),
   scope: text("scope").notNull().default(""), risks: text("risks").notNull().default(""),

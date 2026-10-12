@@ -143,3 +143,6 @@ body {
 .search-box { @apply flex w-full max-w-[320px] items-center gap-2 rounded-xl border border-[#d5e5f0] bg-white px-3 text-[#8aa6ba]; }
 .search-box input { @apply w-full bg-transparent py-2.5 text-[13px] text-[#204762] outline-none placeholder:text-[#9eb4c4]; }
 .hint { @apply rounded-xl bg-[#eef7fc] p-3 text-xs leading-5 text-[#547b99]; }
+.rich-content ul { list-style: disc; padding-left: 1.4rem; }
+.rich-content ol { list-style: decimal; padding-left: 1.4rem; }
+.rich-content p { min-height: 1.2em; white-space: pre-wrap; }

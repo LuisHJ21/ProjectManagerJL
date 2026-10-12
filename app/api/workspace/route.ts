@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
+import { isRichDocument } from "../../../lib/rich-text";
 
 export const dynamic = "force-dynamic";
 type Row = Record<string, unknown>;
@@ -11,6 +12,12 @@ const uuid = () => crypto.randomUUID();
 const db = () => { if (!env.DB) throw new Error("Base de datos no disponible"); return env.DB; };
 const list = (v: unknown) => Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === "string" && !!x).map(x=>x.slice(0,40)))] : [];
 const validRange = (start: string | null, end: string | null) => !start || !end || end >= start;
+const nextDate = (day: string) => { const next = new Date(`${day}T00:00:00Z`); next.setUTCDate(next.getUTCDate()+1); return next.toISOString().slice(0,10); };
+const richValue = (input: unknown) => {
+  if (typeof input !== "string") return null;
+  if (!input.startsWith('{"v":')) return input.trim().slice(0,3000);
+  try { const doc: unknown = JSON.parse(input); return isRichDocument(doc) ? JSON.stringify(doc) : null; } catch { return null; }
+};
 
 async function identity() {
   const auth = await getChatGPTUser();
@@ -137,16 +144,18 @@ export async function POST(request: Request) {
       if (!name||!code) return fail("Completa el nombre y código");
       if (await database.prepare("SELECT id FROM projects WHERE code=?").bind(code).first()) return fail("Ese código ya está registrado");
       await database.prepare("INSERT INTO projects (id,name,code,description,objective,approach,status,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?)")
-        .bind(uuid(),name,code,"","","hybrid","planning",user.id,new Date().toISOString()).run();
+        .bind(uuid(),name,code,"","","hybrid","pending",user.id,new Date().toISOString()).run();
     } else if (operation === "projectProfile") {
       const projectId=value(body.id,40); if(!await hasProject(projectId)) return fail("Proyecto no encontrado",404);
       const amount=Number(body.budget);
       if (!Number.isFinite(amount)||amount<0||amount>1e12) return fail("Presupuesto no válido");
       const currency=["PEN","USD","EUR"].includes(value(body.currency))?body.currency:"PEN";
+      const fields=[richValue(body.description),richValue(body.scope),richValue(body.objective),richValue(body.risks)];
+      if(fields.some(field=>field===null))return fail("El contenido de la ficha no es válido o excede 3000 caracteres por campo");
       await database.prepare("UPDATE projects SET description=?,scope=?,objective=?,risks=?,budget=?,currency=? WHERE id=?")
-        .bind(value(body.description,3000),value(body.scope,3000),value(body.objective,3000),value(body.risks,3000),Math.round(amount*100),currency,projectId).run();
+        .bind(...fields,Math.round(amount*100),currency,projectId).run();
     } else if (operation === "projectStatus") {
-      if (!["planning","active","completed"].includes(value(body.status))) return fail("Estado no válido");
+      if (!["pending","in_progress","standby","cancelled","completed"].includes(value(body.status))) return fail("Estado no válido");
       await database.prepare("UPDATE projects SET status=? WHERE id=?").bind(body.status,value(body.id,40)).run();
     } else if (operation === "group") {
       const name=value(body.name,80); if(!name)return fail("Indica un nombre para el grupo");
@@ -183,8 +192,6 @@ export async function POST(request: Request) {
       if(!await validateAssignees(ids))return fail("Selecciona uno o más responsables válidos");
       const stageId=value(body.stageId,40)||null;
       if(!await validateStage(stageId,projectId))return fail("La etapa no pertenece al proyecto");
-      const start=date(body.plannedStart),end=date(body.plannedEnd);
-      if(!start||!end||!validRange(start,end))return fail("Indica fechas planificadas válidas");
       const kind=body.kind==="milestone"?"milestone":"activity";
       const estimateUnit=body.estimateUnit==="days"?"days":"hours";
       const estimateValue=kind==="milestone"?0:Number(body.estimateValue??body.estimatedHours);
@@ -192,6 +199,18 @@ export async function POST(request: Request) {
       const hours=estimateUnit==="hours"?Math.round(estimateValue):0;
       const dependencyIds=list(body.dependencyIds);
       if(!await validateDependencies(projectId,operation==="task"?null:taskId,dependencyIds))return fail("Las dependencias deben pertenecer al proyecto y no pueden formar ciclos");
+      let start=date(body.plannedStart);
+      if(dependencyIds.length){
+        const finishes:string[]=[];
+        for(const dependencyId of dependencyIds){
+          const predecessor=await database.prepare("SELECT planned_end FROM tasks WHERE id=?").bind(dependencyId).first<{planned_end:string|null}>();
+          if(!predecessor?.planned_end)return fail("Todas las dependencias deben tener una fecha de fin planificada");
+          finishes.push(predecessor.planned_end);
+        }
+        start=nextDate(finishes.sort().at(-1)!);
+      }
+      const end=date(body.plannedEnd);
+      if(!start||!end||!validRange(start,end))return fail("El fin planificado debe ser igual o posterior al inicio calculado");
       const priority=["low","medium","high"].includes(value(body.priority))?body.priority:"medium";
       if(operation==="task") {
         const newId=uuid();
